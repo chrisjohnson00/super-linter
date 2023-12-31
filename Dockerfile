@@ -27,6 +27,38 @@ FROM yoheimuta/protolint:0.47.4 as protolint
 FROM ghcr.io/clj-kondo/clj-kondo:2023.12.15-alpine as clj-kondo
 FROM dart:3.2.4-sdk as dart
 
+FROM python:3.12.1-alpine3.19 as python-builder
+
+RUN apk add --no-cache \
+    bash
+
+SHELL ["/bin/bash", "-o", "errexit", "-o", "nounset", "-o", "pipefail", "-c"]
+
+COPY dependencies/python/ /stage
+WORKDIR /stage
+RUN ./build-venvs.sh && rm -rfv /stage
+
+FROM python:3.12.1-alpine3.19 as npm-builder
+
+RUN apk add --no-cache \
+    bash \
+    nodejs-current
+
+# Install Node tools
+# The chown fixes broken uid/gid in ast-types-flow dependency
+# (see https://github.com/super-linter/super-linter/issues/3901)
+# Npm is not a runtime dependency but we need it to ensure that npm packages
+# are installed when we run the test suite. If we decide to remove it, add
+# the following command to the RUN instruction below:
+# apk del --no-network --purge .node-build-deps
+COPY dependencies/package.json dependencies/package-lock.json /
+RUN apk add --no-cache --virtual .node-build-deps \
+    npm \
+    && npm install \
+    && npm cache clean --force \
+    && chown -R "$(id -u)":"$(id -g)" node_modules \
+    && rm -rfv package.json package-lock.json
+
 FROM python:3.12.1-alpine3.19 as base_image
 
 LABEL com.github.actions.name="Super-Linter" \
@@ -80,20 +112,8 @@ RUN apk add --no-cache \
     ruby \
     zef
 
-# Install Node tools
-# The chown fixes broken uid/gid in ast-types-flow dependency
-# (see https://github.com/super-linter/super-linter/issues/3901)
-# Npm is not a runtime dependency but we need it to ensure that npm packages
-# are installed when we run the test suite. If we decide to remove it, add
-# the following command to the RUN instruction below:
-# apk del --no-network --purge .node-build-deps
-COPY dependencies/package.json dependencies/package-lock.json /
-RUN apk add --no-cache --virtual .node-build-deps \
-    npm \
-    && npm install \
-    && npm cache clean --force \
-    && chown -R "$(id -u)":"$(id -g)" node_modules \
-    && rm -rfv package.json package-lock.json
+# Copy Node tools
+COPY --from=npm-builder /node_modules /node_modules
 
 # Install Ruby tools
 COPY dependencies/Gemfile dependencies/Gemfile.lock /
@@ -251,14 +271,10 @@ RUN /install-lintr.sh && rm -rf /install-lintr.sh /install-r-package-or-fail.R
 COPY scripts/install-lua.sh /
 RUN --mount=type=secret,id=GITHUB_TOKEN /install-lua.sh && rm -rf /install-lua.sh
 
-#####################################
-# Build python virtual environments #
-#####################################
-COPY dependencies/python/ /stage
-WORKDIR /stage
-RUN ./build-venvs.sh && rm -rfv /stage
-# Set work directory back to root because some scripts depend on it
-WORKDIR /
+########################
+# Install python tools #
+########################
+COPY --from=python-builder /venvs /venvs
 
 ##############################
 # Install Phive dependencies #
